@@ -15,7 +15,7 @@
 	 start/2, stop/1, % gen_mod API
 	 muc_online_rooms/1,
 	 muc_unregister_nick/1,
-	 create_room/3, destroy_room/3,
+         does_room_exist/2, create_room/3, destroy_room/3,
 	 create_rooms_file/1, destroy_rooms_file/1,
 	 rooms_unused_list/2, rooms_unused_destroy/2,
 	 get_room_occupants/2,
@@ -24,6 +24,7 @@
 	 change_room_option/4,
 	 set_room_affiliation/4,
 	 get_room_affiliations/2,
+         send_system_message/3,
 	 web_menu_main/2, web_page_main/2, % Web Admin API
 	 web_menu_host/3, web_page_host/3
 	]).
@@ -73,7 +74,11 @@ commands() ->
 		       module = ?MODULE, function = muc_unregister_nick,
 		       args = [{nick, binary}],
 		       result = {res, rescode}},
-
+     #ejabberd_commands{name= does_room_exist, tags = [muc_room],
+                       desc = "Check if a room name@service exists.",
+                       module = ?MODULE, function = does_room_exist,
+                       args = [{name, binary}, {service, binary}],
+                       result = {res, rescode}},
      #ejabberd_commands{name = create_room, tags = [muc_room],
 		       desc = "Create a MUC room name@service in host",
 		       module = ?MODULE, function = create_room,
@@ -153,10 +158,15 @@ commands() ->
 						 {affiliation, {tuple,
 								[{username, string},
 								 {domain, string},
-								 {affiliation, atom},
+								 {affiliation, string},
 								 {reason, string}
 								]}}
-						}}}
+						}}},
+     #ejabberd_commands{name = send_system_message, tags = [muc_room],
+			desc = "Send a system message to a room",
+			module = ?MODULE, function = send_system_message,
+			args = [{name, binary}, {service, binary}, {message, binary}],
+			result = {res, rescode}}
     ].
 
 
@@ -370,8 +380,17 @@ prepare_room_info(Room_info) ->
 
 
 %%----------------------------
-%% Create/Delete Room
+%% Create/Delete/Verify Room
 %%----------------------------
+
+%% @spec (Name::binary(), Service::binary()) ->
+%%       true | false
+%% @doc Check if a room exists.
+does_room_exist(Name, Service) ->
+    case get_room_pid(Name, Service) of
+	room_not_found -> false;
+	_Pid -> true
+    end.
 
 %% @spec (Name::binary(), Host::binary(), ServerHost::binary()) ->
 %%       ok | error
@@ -732,13 +751,13 @@ change_room_option(Name, Service, Option, Value) when is_atom(Option) ->
     {ok, _} = change_room_option(Pid, Option, Value),
     ok;
 change_room_option(Name, Service, OptionString, ValueString) ->
-    Option = list_to_atom(OptionString),
+    Option = list_to_atom(binary_to_list(OptionString)),
     Value = case Option of
 	title -> ValueString;
 	description -> ValueString;
 	password -> ValueString;
 	max_users -> list_to_integer(ValueString);
-	_ -> list_to_atom(ValueString)
+	_ -> list_to_atom(binary_to_list(ValueString))
     end,
     change_room_option(Name, Service, Option, Value).
 
@@ -796,9 +815,9 @@ get_room_affiliations(Name, Service) ->
 	    Affiliations = ?DICT:to_list(StateData#state.affiliations),
 	    lists:map(
 	      fun({{Uname, Domain, _Res}, {Aff, Reason}}) when is_atom(Aff)->
-		      {Uname, Domain, Aff, Reason};
+		      {Uname, Domain, atom_to_list(Aff), Reason};
 		 ({{Uname, Domain, _Res}, Aff}) when is_atom(Aff)->
-		      {Uname, Domain, Aff, <<>>}
+		      {Uname, Domain, atom_to_list(Aff), <<>>}
 	      end, Affiliations);
 	[] ->
 	    throw({error, "The room does not exist."})
@@ -817,7 +836,7 @@ get_room_affiliations(Name, Service) ->
 %% If the affiliation is 'none', the action is to remove,
 %% In any other case the action will be to create the affiliation.
 set_room_affiliation(Name, Service, JID, AffiliationString) ->
-    Affiliation = list_to_atom(AffiliationString),
+    Affiliation = list_to_atom(binary_to_list(AffiliationString)),
     case mnesia:dirty_read(muc_online_room, {Name, Service}) of
 	[R] ->
 	    %% Get the PID for the online room so we can get the state of the room
@@ -864,8 +883,15 @@ make_opts(StateData) ->
      {subject, StateData#state.subject},
      {subject_author, StateData#state.subject_author}
     ].
-
-
+%%----------------------------
+%% Send messages
+%%----------------------------
+send_system_message(Name, Service, Msg) ->
+        case get_room_pid(Name, Service) of
+	room_not_found -> throw({error, room_not_found});
+	Pid -> gen_fsm:send_all_state_event(Pid, {service_message, Msg})
+    end.
+       
 %%----------------------------
 %% Utils
 %%----------------------------
