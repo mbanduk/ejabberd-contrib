@@ -166,7 +166,25 @@ commands() ->
 			desc = "Send a system message to a room",
 			module = ?MODULE, function = send_system_message,
 			args = [{name, binary}, {service, binary}, {message, binary}],
-			result = {res, rescode}}
+			result = {res, rescode}},
+
+     #ejabberd_commands{name = send_message_chat, tags = [muc_room],
+      desc = "Send a chat message to a local or remote bare of full JID",
+      module = ?MODULE, function = send_message_chat,
+      args = [
+        {from, binary}, 
+        {to, binary}, 
+        {body, binary}, 
+        {metadata, {list, 
+          {pairs, {tuple, 
+            [ 
+              {tag, binary},
+              {value, binary} 
+            ] 
+          } } 
+        } }
+      ],
+      result = {res, rescode}}
     ].
 
 
@@ -883,6 +901,7 @@ make_opts(StateData) ->
      {subject, StateData#state.subject},
      {subject_author, StateData#state.subject_author}
     ].
+
 %%----------------------------
 %% Send messages
 %%----------------------------
@@ -892,6 +911,65 @@ send_system_message(Name, Service, Msg) ->
 	Pid -> gen_fsm:send_all_state_event(Pid, {service_message, Msg})
     end.
        
+%% @doc Send a chat message to a Jabber account.
+%% @spec (From::binary(), To::binary(), Body::binary(), Metadata::list()) -> ok
+send_message_chat(From, To, Body, Metadata) ->
+    Packet = build_packet(message_chat, [Body, Metadata]),
+    send_packet_all_resources(From, To, Packet).
+
+
+%% @doc Send a packet to a Jabber account.
+%% If a resource was specified in the JID,
+%% the packet is sent only to that specific resource.
+%% If no resource was specified in the JID,
+%% and the user is remote or local but offline,
+%% the packet is sent to the bare JID.
+%% If the user is local and is online in several resources,
+%% the packet is sent to all its resources.
+send_packet_all_resources(FromJIDString, ToJIDString, Packet) ->
+    FromJID = jlib:string_to_jid(FromJIDString),
+    ToJID = jlib:string_to_jid(ToJIDString),
+    ToUser = ToJID#jid.user,
+    ToServer = ToJID#jid.server,
+    case ToJID#jid.resource of
+  <<>> ->
+      send_packet_all_resources(FromJID, ToUser, ToServer, Packet);
+  Res ->
+      send_packet_all_resources(FromJID, ToUser, ToServer, Res, Packet)
+    end.
+
+send_packet_all_resources(FromJID, ToUser, ToServer, Packet) ->
+    case ejabberd_sm:get_user_resources(ToUser, ToServer) of
+  [] ->
+      send_packet_all_resources(FromJID, ToUser, ToServer, <<>>, Packet);
+  ToResources ->
+      lists:foreach(
+        fun(ToResource) ->
+          send_packet_all_resources(FromJID, ToUser, ToServer,
+            ToResource, Packet)
+        end,
+        ToResources)
+    end.
+
+send_packet_all_resources(FromJID, ToU, ToS, ToR, Packet) ->
+    ToJID = jlib:make_jid(ToU, ToS, ToR),
+    ejabberd_router:route(FromJID, ToJID, Packet).
+
+build_packet(message_chat, [Body, Metadata]) ->
+    {xmlel, <<"message">>,
+     [{<<"type">>, <<"chat">>}, {<<"id">>, randoms:get_string()}],
+     [
+        {xmlel, <<"body">>, [], [{xmlcdata, Body}]},
+        build_metadata_tags(Metadata)
+     ]
+    }.
+
+build_metadata_tags(Metadata) ->
+    map(build_metadata_tag, Metadata).
+
+build_metadata_tag({Tag, Value}) ->
+    {xmlel, Tag, [], [{xmlcdata, Value}]}.
+
 %%----------------------------
 %% Utils
 %%----------------------------
